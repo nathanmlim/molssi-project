@@ -20,7 +20,7 @@ Here, my goal is to **develop a generalized framework in BLUES which enables the
                 - `super(GHMCMove, self).apply(thermodynamic_state, sampler_state)`
     - Moves generate the integrator, accumulate the statistics, handle updating the `States` and the `Contexts`, and handle acceptance/rejection.
 
-```dot
+![Alt text](https://g.gravizo.com/svg?
 graph G {
     spline=0
     subgraph cluster_0 {
@@ -82,4 +82,4 @@ graph G {
 
     "MCMCSampler" [label="{mcmc.MCMCSampler|move\lsampler_state\lthermodynamic_state\l|__init__()\lminimize()\lrun()\l}", shape="record"];
 }
-```
+)
