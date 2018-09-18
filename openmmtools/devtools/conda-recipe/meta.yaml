@@ -1,0 +1,46 @@
+package:
+  name: openmmtools-dev
+  version: 0.0.0
+
+source:
+  path: ../../
+
+build:
+  preserve_egg_dir: True
+  number: 0
+
+requirements:
+  build:
+    - python
+#    - cython
+#    - numpy
+#    - scipy
+    - setuptools
+    - openmm
+#    - parmed
+#    - mdtraj
+#    - netcdf4
+#    - pyyaml
+
+  run:
+    - python
+    - numpy
+    - scipy
+    - six
+    - openmm
+    - parmed
+    - mdtraj
+    - netcdf4
+    - pyyaml
+
+
+test:
+  requires:
+    - nose
+    - pymbar
+  imports:
+    - openmmtools
+
+about:
+  home: https://github.com/choderalab/openmmtools
+  license: MIT License
