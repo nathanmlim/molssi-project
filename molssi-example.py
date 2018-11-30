@@ -9,7 +9,6 @@ from openmmtools.utils import RestorableOpenMMObject
 from openmmtools.integrators import *
 import numpy as np
 import copy, sys, time, os, math
-import nglview
 import logging
 from simtk import openmm
 import parmed
@@ -28,7 +27,7 @@ logging.getLogger("openmmtools.alchemy").setLevel(logging.ERROR)
 np.random.RandomState(seed=3134)
 logging.basicConfig(
     format='%(asctime)s | %(levelname)s : %(message)s',
-    level=logging.INFO,
+    level=logging.DEBUG,
     stream=sys.stdout)
 
 
@@ -754,13 +753,24 @@ class NCMCSampler(object):
 
 
 from blues import utils
+parser = argparse.ArgumentParser(description='Restart file name')
+parser.add_argument('-j', '--jobname', type=str, help="store jobname")
+parser.add_argument('-n', '--nIter', type=int, help="number of Iterations")
+parser.add_argument('-s', '--nsteps', type=int, help="number of steps")
+parser.add_argument('-r', '--reportInterval', type=int, help="reportInterval")
+args = parser.parse_args()
+
+
+
 # Define parameters
 temperature = 300 * unit.kelvin
 collision_rate = 1 / unit.picoseconds
 timestep = 4.0 * unit.femtoseconds
-n_steps = 20000
-reportInterval = 2000
-nIter = 1000
+n_steps = args.nsteps
+reportInterval = args.reportInterval
+nIter = args.nIter
+
+print('nIter: {}, nsteps: {}, timestep: {}, reportInterval: {}'.format(nIter, n_steps, timestep, reportInterval))
 
 prmtop = utils.get_data_filename('blues', 'tests/data/eqToluene.prmtop')
 inpcrd = utils.get_data_filename('blues', 'tests/data/eqToluene.inpcrd')
@@ -775,12 +785,23 @@ tol.system = tol.createSystem(
     flexibleConstraints=True,
     splitDihedrals=False)
 
-factory = alchemy.AbsoluteAlchemicalFactory(consistent_exceptions=False)
+factory = alchemy.AbsoluteAlchemicalFactory(consistent_exceptions=False,
+                                            disable_alchemical_dispersion_correction=True,
+                                            alchemical_pme_treatment='direct-space')
 alchemical_atom_idx = utils.atomIndexfromTop('LIG', tol.topology)
 alchemical_region = alchemy.AlchemicalRegion(
     alchemical_atoms=alchemical_atom_idx,
+    softcore_alpha=0.5,
+    softcore_a=1,
+    softcore_b=1,
+    softcore_c=6,
+    softcore_beta=0.0,
+    softcore_d=1,
+    softcore_e=1,
+    softcore_f=2,
     annihilate_sterics=False,
-    annihilate_electrostatics=True)
+    annihilate_electrostatics=True,
+    )
 alchemical_atoms = list(alchemical_region.alchemical_atoms)
 toluene_alchemical_system = factory.create_alchemical_system(
     reference_system=tol.system, alchemical_regions=alchemical_region)
@@ -801,9 +822,6 @@ thermodynamic_state = ThermodynamicState(
     system=tol.system, temperature=temperature)
 sampler_state = SamplerState(positions=tol.positions)
 
-parser = argparse.ArgumentParser(description='Restart file name')
-parser.add_argument('-j', '--jobname', type=str, help="store jobname")
-args = parser.parse_args()
 
 from blues.reporters import NetCDF4Reporter
 with open('%s.pdb' % args.jobname, 'w') as pdb:
