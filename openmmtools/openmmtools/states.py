@@ -18,6 +18,7 @@ import abc
 import sys
 import copy
 import zlib
+import inspect
 import weakref
 import collections
 
@@ -30,6 +31,151 @@ from openmmtools import utils, integrators, forces, constants
 # =============================================================================
 # MODULE FUNCTIONS
 # =============================================================================
+
+def create_thermodynamic_state_protocol(system, protocol, constants=None,
+                                        composable_states=None):
+    """An optimized utility function to create a list of thermodynamic states.
+
+    The method takes advantage of the fact that copying a thermodynamic state
+    does not require a copy of the OpenMM ``System`` object and that setting
+    parameters that are controlled by the ``(Compound)ThermodynamicState``
+    is effectively instantaneous.
+
+    Parameters
+    ----------
+    reference_state : ThermodynamicState or simtk.openmm.System
+        ``ThermodynamicState`` or The OpenMM ``System``. If a ``System`` the
+        constants must specify the temperature.
+    protocol : dict: str -> list
+        A dictionary associating the thermodynamic parameters to a list of
+        values. All the lists must have the same length.
+    constants : dict: str -> list
+        A dictionary associating a thermodnamic parameter to a value that
+        must remain constant along the protocol.
+    composable_states : IComposableState or list, optional
+        If specified, the function returns a list of ``CompoundThermodynamicState``
+        instead of simple ``ThermodynamicState`` objects.
+
+    Returns
+    -------
+    states : list of ``ThermodynamicState`` or ``CompoundThermodynamicState``
+        The sequence of thermodynamic states for the given protocol.
+
+    Examples
+    --------
+
+    >>> from simtk import unit
+    >>> from openmmtools import testsystems
+    >>> system = testsystems.AlanineDipeptideExplicit().system
+    >>> protocol = {'temperature': [300, 310, 330]*unit.kelvin,
+    ...             'pressure': [1.0, 1.1, 1.2]*unit.atmosphere}
+    >>> states = create_thermodynamic_state_protocol(system, protocol)
+    >>> len(states)
+    3
+
+    """
+    # Check that all elements of the protocol have the same length.
+    if len(protocol) == 0:
+        raise ValueError('No protocol has been specified.')
+    values_lengths = [len(values) for values in protocol.values()]
+    if len(set(values_lengths)) != 1:
+        raise ValueError('The protocol parameter values have different '
+                         'lengths!\n{}'.format(protocol))
+    protocol_length = values_lengths[0]
+
+    # Handle default value.
+    if constants is None:
+        constants = {}
+
+    # Check that the user didn't specify the same parameter as both
+    # a constant and a protocol variable.
+    if len(set(constants).intersection(set(protocol))) != 0:
+        raise ValueError('Some parameters have been specified both '
+                         'in constants and protocol.')
+
+    # Augument protocol to include the constants values as well.
+    for constant_parameter, value in constants.items():
+        protocol[constant_parameter] = [value for _ in range(protocol_length)]
+
+    # Create the reference ThermodynamicState.
+    if isinstance(system, openmm.System):
+        # Make sure the temperature is defined somewhere.
+        try:
+            temperature = constants['temperature']
+        except KeyError:
+            try:
+                temperature = protocol['temperature'][0]
+            except KeyError:
+                raise ValueError('If a System is passed the list of '
+                                 'constants must specify the temperature.')
+        thermo_state = ThermodynamicState(system, temperature=temperature)
+    else:
+        thermo_state = system
+
+    # Check if we need to create a reference CompoundThermodynamicState.
+    # Cast a single ComposableState into a list.
+    if isinstance(composable_states, IComposableState):
+        composable_states = [composable_states]
+    if composable_states is not None:
+        thermo_state = CompoundThermodynamicState(thermo_state, composable_states)
+
+    # Create all the states. Copying a state is much faster than
+    # initializing one because we don't have to copy System object.
+    states = [copy.deepcopy(thermo_state) for _ in range(protocol_length)]
+
+    # Assign protocol parameters.
+    protocol_keys, protocol_values = zip(*protocol.items())
+    for state_idx, state_values in enumerate(zip(*protocol_values)):
+        state = states[state_idx]
+        for lambda_key, lambda_value in zip(protocol_keys, state_values):
+            if hasattr(state, lambda_key):
+                setattr(state, lambda_key, lambda_value)
+            else:
+                raise AttributeError('{} object does not have protocol attribute '
+                                     '{}'.format(type(state), lambda_key))
+
+    return states
+
+
+def reduced_potential_at_states(sampler_state, thermodynamic_states, context_cache):
+    """Compute the reduced potential of a single configuration at multiple thermodynamic states.
+
+    Parameters
+    ----------
+    sampler_state : SamplerState
+        The state holding the coordinates used to compute the potential.
+    thermodynamic_states : list of ``ThermodynamicState``
+        The list of thermodynamic states at which to compute the potential.
+    context_cache : cache.ContextCache
+        The context cache to use to request ``Context`` objects.
+
+    Returns
+    -------
+    reduced_potentials : np.ndarray of float
+        ``reduced_potentials[i]`` is the unit-less reduced potentials
+        (i.e., in kT units) of state ``thermodynamic_states[i]``.
+
+    """
+    reduced_potentials = np.zeros(len(thermodynamic_states))
+
+    # Group thermodynamic states by compatibility.
+    compatible_groups, original_indices = group_by_compatibility(thermodynamic_states)
+
+    # Compute the reduced potentials of all the compatible states.
+    for compatible_group, state_indices in zip(compatible_groups, original_indices):
+        # Get the context, any Integrator works.
+        context, integrator = context_cache.get_context(compatible_group[0])
+
+        # Update positions and box vectors. We don't need
+        # to set Context velocities for the potential.
+        sampler_state.apply_to_context(context, ignore_velocities=True)
+
+        # Compute and update the reduced potentials.
+        compatible_energies = ThermodynamicState.reduced_potential_at_states(
+            context, compatible_group)
+        for energy_idx, state_idx in enumerate(state_indices):
+            reduced_potentials[state_idx] = compatible_energies[energy_idx]
+
 
 def group_by_compatibility(thermodynamic_states):
     """Utility function to split the thermodynamic states by compatibility.
@@ -1027,16 +1173,19 @@ class ThermodynamicState(object):
     def __getstate__(self, skip_system=False):
         """Return a dictionary representation of the state.
 
-        Zlib compresses the serialized system after its created
-        Many alchemical systems have very long serializations, so this method  helps reduce space in memory and on disk
-        Forces encoding for compatibility between separate Python installs (utf-8 by default)
+        Zlib compresses the serialized system after its created. Many
+        alchemical systems have very long serializations so this method
+        helps reduce space in memory and on disk. The compression forces
+        the encoding for compatibility between separate Python installs
+        (utf-8 by default).
 
         Parameters
         ----------
         skip_system: bool, Default: False
-            Chooses whether or not to get the serialized system as the part of the return.
-            If False, then the serialized system is computed and returned
-            If True, Then "None" is returned for the "standard_system"
+            Choose whether or not to get the serialized system as the part
+            of the return. If False, then the serialized system is computed
+            and included in the serialization. If True, then ``None`` is
+            returned for the ``'standard_system'`` field of the serialization.
 
         """
         serialized_system = None
@@ -1971,18 +2120,36 @@ class SamplerState(object):
         sampler_state._collective_variables = None
         return sampler_state
 
-    def __getstate__(self):
-        """Return a dictionary representation of the state."""
+    def __getstate__(self, ignore_velocities=False):
+        """Return a dictionary representation of the state.
+
+        Parameters
+        ----------
+        ignore_velocities : bool, optional
+            If True, velocities are not serialized. This can be useful for
+            example to save bandwidth when sending a ``SamplerState`` over
+            the network and velocities are not required (default is False).
+        """
+        velocities = None if ignore_velocities else self.velocities
         serialization = dict(
-            positions=self.positions, velocities=self.velocities,
+            positions=self.positions, velocities=velocities,
             box_vectors=self.box_vectors, potential_energy=self.potential_energy,
             kinetic_energy=self.kinetic_energy,
             collective_variables=self.collective_variables
         )
         return serialization
 
-    def __setstate__(self, serialization):
-        """Set the state from a dictionary representation."""
+    def __setstate__(self, serialization, ignore_velocities=False):
+        """Set the state from a dictionary representation.
+
+        Parameters
+        ----------
+        ignore_velocities : bool, optional
+            If True and the ``SamplerState`` has already velocities
+            defined, this does not overwrite the velocities.
+        """
+        if ignore_velocities and '_velocities' in self.__dict__:
+            serialization['velocities'] = self.velocities
         self._initialize(**serialization)
 
     # -------------------------------------------------------------------------
@@ -2189,7 +2356,7 @@ class IComposableState(utils.SubhookedABCMeta):
 
         Raises
         ------
-        CompatibleStateError
+        ComposableStateError
             If the system is not compatible with the state.
 
         """
@@ -2252,14 +2419,14 @@ class IComposableState(utils.SubhookedABCMeta):
 
         Raises
         ------
-        CompatibleStateError
+        ComposableStateError
             If the system is not compatible with the state.
 
         """
         pass
 
     @abc.abstractmethod
-    def _on_setattr(self, standard_system, attribute_name):
+    def _on_setattr(self, standard_system, attribute_name, old_composable_state):
         """Check if standard system needs to be updated after a state attribute is set.
 
         This callback function is called after an attribute is set (i.e.
@@ -2273,12 +2440,19 @@ class IComposableState(utils.SubhookedABCMeta):
             The standard system before setting the attribute.
         attribute_name : str
             The name of the attribute that has just been set or retrieved.
+        old_composable_state : IComposableState
+            A copy of the composable state before the attribute was set.
 
         Returns
         -------
         need_changes : bool
             True if the standard system has to be updated, False if no change
             occurred.
+
+        Raises
+        ------
+        ComposableStateError
+            If the attribute change put the system in an inconsistent state.
 
         """
         pass
@@ -2504,25 +2678,42 @@ class CompoundThermodynamicState(ThermodynamicState):
             s.apply_to_context(context)
 
     def __getattr__(self, name):
-        def setter_decorator(func, composable_state):
+        def setter_decorator(funcs, composable_states):
             def _setter_decorator(*args, **kwargs):
-                func(*args, **kwargs)
-                self._on_setattr_callback(composable_state, name)
+                for func, composable_state in zip(funcs, composable_states):
+                    old_state = copy.deepcopy(composable_state)
+                    func(*args, **kwargs)
+                    self._on_setattr_callback(composable_state, name, old_state)
             return _setter_decorator
 
         # Called only if the attribute couldn't be found in __dict__.
         # In this case we fall back to composable state, in the given order.
+        attrs = []
+        composable_states = []
         for s in self._composable_states:
             try:
                 attr = getattr(s, name)
             except AttributeError:
                 pass
             else:
-                if name.startswith('set_'):
-                    # Decorate the setter so that _on_setattr is called
-                    # after the attribute is modified.
-                    attr = setter_decorator(attr, s)
-                return attr
+                attrs.append(attr)
+                composable_states.append(s)
+
+        if len(attrs) > 0:
+            # If this is a setter, we need to set the attribute in all states
+            # and ensure that the callback is called in each of them.
+            if name.startswith('set_'):
+                # Decorate the setter so that _on_setattr is called after the
+                # attribute is modified. This also reduces the calls to multiple
+                # setter to a single function.
+                attr = setter_decorator(attrs, composable_states)
+            else:
+                if len(attrs) > 1 and not all(np.isclose(attrs[0], a) for a in attrs[1:]):
+                    raise RuntimeError('The composable states of {} expose the same '
+                                       'attribute with different values: {}'.format(
+                        self.__class__.__name__, set(attrs)))
+                attr = attrs[0]
+            return attr
 
         # Attribute not found, fall back to normal behavior.
         return super(CompoundThermodynamicState, self).__getattribute__(name)
@@ -2539,18 +2730,23 @@ class CompoundThermodynamicState(ThermodynamicState):
         elif any(name in C.__dict__ for C in self.__class__.__mro__):
             super(CompoundThermodynamicState, self).__setattr__(name, value)
 
-        # Update composable states attributes (check ancestors).
-        # We can't use hasattr here because it calls __getattr__,
-        # which search in all composable states as well.
+        # Update composable states attributes. This catches also normal
+        # attributes besides properties and methods.
         else:
+            old_state = None
             for s in self._composable_states:
-                if hasattr(s, name):
+                try:
+                    getattr(s, name)
+                except AttributeError:
+                    pass
+                else:
+                    old_state = copy.deepcopy(s)
                     s.__setattr__(name, value)
-                    self._on_setattr_callback(s, name)
-                    return
+                    self._on_setattr_callback(s, name, old_state)
 
             # No attribute found. This is monkey patching.
-            super(CompoundThermodynamicState, self).__setattr__(name, value)
+            if old_state is None:
+                super(CompoundThermodynamicState, self).__setattr__(name, value)
 
     def __getstate__(self, **kwargs):
         """Return a dictionary representation of the state."""
@@ -2602,9 +2798,20 @@ class CompoundThermodynamicState(ThermodynamicState):
         for composable_state in self._composable_states:
             composable_state._standardize_system(system)
 
-    def _on_setattr_callback(self, composable_state, attribute_name):
+    def _on_setattr_callback(self, composable_state, attribute_name, old_composable_state):
         """Updates the standard system (and hash) after __setattr__."""
-        if composable_state._on_setattr(self._standard_system, attribute_name):
+        try:
+            change_standard_system = composable_state._on_setattr(self._standard_system, attribute_name, old_composable_state)
+        except TypeError:
+            change_standard_system = composable_state._on_setattr(self._standard_system, attribute_name)
+            # TODO Drop support for the old signature and remove deprecation warning from 0.17 on.
+            import warnings
+            old_signature = '_on_setattr(self, standard_system, attribute_name)'
+            new_signature = old_signature[:-1] + ', old_composable_state)'
+            warnings.warn('The signature IComposableState.{} has been deprecated, '
+                          'and future versions of openmmtools will support only the '
+                          'new one: {}.'.format(old_signature, new_signature))
+        if change_standard_system:
             new_standard_system = copy.deepcopy(self._standard_system)
             composable_state.apply_to_system(new_standard_system)
             composable_state._standardize_system(new_standard_system)
@@ -2632,6 +2839,912 @@ class CompoundThermodynamicState(ThermodynamicState):
             force_groups.update(composable_state._find_force_groups_to_update(
                 context, current_context_state, memo[composable_state_idx]))
         return force_groups
+
+
+# =============================================================================
+# GLOBAL PARAMETER STATE
+# =============================================================================
+
+class GlobalParameterError(ComposableStateError):
+    """Exception raised by ``GlobalParameterState``."""
+    pass
+
+
+class GlobalParameterFunction(object):
+    """A function of global parameters.
+
+    All the functions supported by ``openmmtools.utils.math_eval``
+    are supported.
+
+    Parameters
+    ----------
+    expression : str
+        A mathematical expression involving global parameters.
+
+    See Also
+    --------
+    openmmtools.utils.math_eval
+
+    Examples
+    --------
+    >>> class MyComposableState(GlobalParameterState):
+    ...     gamma = GlobalParameterState.GlobalParameter('gamma', standard_value=1.0)
+    ...     lambda_angles = GlobalParameterState.GlobalParameter('lambda_angles', standard_value=1.0)
+    ...
+    >>> composable_state = MyComposableState(gamma=1.0, lambda_angles=0.5)
+    >>> composable_state.set_function_variable('lambda', 0.5)
+    >>> composable_state.set_function_variable('lambda2', 1.0)
+    >>> composable_state.gamma = GlobalParameterFunction('lambda**2')
+    >>> composable_state.gamma
+    0.25
+    >>> composable_state.lambda_angles = GlobalParameterFunction('(lambda + lambda2) / 2')
+    >>> composable_state.lambda_angles
+    0.75
+    >>> composable_state.set_function_variable('lambda2', 0.5)
+    >>> composable_state.lambda_angles
+    0.5
+
+    """
+    def __init__(self, expression):
+        self._expression = expression
+
+    def __call__(self, variables):
+        return utils.math_eval(self._expression, variables)
+
+
+class GlobalParameterState(object):
+    """A composable state controlling one or more OpenMM ``Force``'s global parameters.
+
+    This is a partially abstract class that provides facilities to implement
+    composable states that control one or more global parameters defined in
+    OpenMM ``Force`` objects. Global parameters are implemented  through the
+    use of the ``GlobalParameterState.GlobalParameter`` descriptor.
+
+    A ``Force`` object can use one or more global parameters that are
+    controlled by the same state. Conversely, multiple ``Force``s can use
+    the same global parameter (i.e. with the same name) controlled by the
+    state object.
+
+    It is possible to enslave the global parameters to one or more arbitrary
+    variables entering a mathematical expression through the use of
+    ``GlobalParameterFunction``. Global parameters that are associated to a
+    global parameter function are validated on get rather than on set.
+
+    Parameters
+    ----------
+    parameters_name_suffix : str, optional
+        If specified, the state will control a modified version of the global
+        parameters with the name ``parameter_name + '_' + parameters_name_suffix``.
+        When this is the case, the normal parameters are not accessible.
+    **kwargs
+        The value of the parameters controlled by this state. Parameters
+        that are not passed here are left undefined.
+
+    Notes
+    -----
+    The class automatically implement the static constructor ``from_system``
+    that reads and create a state object from an OpenMM ``System``. The function
+    calls ``__init__`` and passes the parameter name suffix string as the
+    first positional argument, so it is possible to overwrite ``__init__``
+    and rename ``parameters_name_suffix`` as long as it is the first parameter
+    of the constructor.
+
+    See Also
+    --------
+    GlobalParameterFunction
+
+    Examples
+    --------
+
+    Assume we have a ``System`` with a custom force object whose energy
+    function is controlled by two global variables called ``lambda_bonds``
+    and ``gamma``.
+
+    >>> from simtk import openmm, unit
+    >>> # Define a diatomic molecule.
+    >>> system = openmm.System()
+    >>> particle_idx = system.addParticle(40.0*unit.amu)
+    >>> particle_idx = system.addParticle(40.0*unit.amu)
+    >>> custom_force = openmm.CustomBondForce('lambda_bonds^gamma*60000*(r-0.15)^2;')
+    >>> parameter_idx = custom_force.addGlobalParameter('lambda_bonds', 1.0)  # Default value is 1.0.
+    >>> parameter_idx = custom_force.addGlobalParameter('gamma', 1.0)  # Default value is 1.0.
+    >>> bond_idx = custom_force.addBond(0, 1, [])
+    >>> force_index = system.addForce(custom_force)
+    >>> # Create a thermodynamic state object controlling the temperature of the system.
+    >>> thermodynamic_state = ThermodynamicState(system, temperature=300.0*unit.kelvin)
+
+    Define a composable state controlling the two global parameters ``gamma``
+    and ``lambda_bonds``, both with standard state value 0.0. Parameters that
+    are not specified in the constructor are left undefined.
+
+    >>> class MyComposableState(GlobalParameterState):
+    ...     gamma = GlobalParameterState.GlobalParameter('gamma', standard_value=1.0)
+    ...     lambda_bonds = GlobalParameterState.GlobalParameter('lambda_bonds', standard_value=1.0)
+    ...
+    >>> my_composable_state = MyComposableState(gamma=1.0)
+    >>> my_composable_state.gamma
+    1.0
+    >>> my_composable_state.lambda_bonds is None
+    True
+
+    There is a second static constructor you can use to read the state
+    of an OpenMM ``System`` from the default values of its force parameters.
+
+    >>> my_composable_state = MyComposableState.from_system(system)
+    >>> my_composable_state.lambda_bonds
+    1.0
+    >>> my_composable_state.gamma
+    1.0
+
+    Optionally, you can limit the values that a global parameter can assume.
+    In this case, ``lambda_bonds`` is forced to be between 0.0 and 1.0.
+
+    >>> class MyComposableState(GlobalParameterState):
+    ...     gamma = GlobalParameterState.GlobalParameter('gamma', standard_value=0.0)
+    ...     lambda_bonds = GlobalParameterState.GlobalParameter('lambda_bonds', standard_value=0.0)
+    ...     @lambda_bonds.validator
+    ...     def lambda_bonds(self, instance, new_value):
+    ...         if new_value is not None and not (0.0 <= new_value <= 1.0):
+    ...             raise ValueError('lambda_bonds must be between 0.0 and 1.0')
+    ...         return new_value
+    ...
+    >>> my_composable_state = MyComposableState(gamma=1.0)
+    >>> my_composable_state.lambda_bonds = 2.0
+    Traceback (most recent call last):
+    ...
+    ValueError: lambda_bonds must be between 0.0 and 1.0
+
+    You can then add it to a ``CompoundThermodynamicState`` to manipulate
+    OpenMM ``System`` and ``Context`` objects.
+
+    >>> my_composable_state.lambda_bonds = 1.0
+    >>> compound_state = CompoundThermodynamicState(thermodynamic_state, composable_states=[my_composable_state])
+    >>> state_system = compound_state.get_system()
+    >>> state_system.getForce(0).getGlobalParameterDefaultValue(0)  # lambda_bonds global parameter.
+    1.0
+    >>> compound_state.lambda_bonds = 0.0
+    >>> state_system = compound_state.get_system()
+    >>> state_system.getForce(0).getGlobalParameterDefaultValue(0)  # lambda_bonds global parameter.
+    0.0
+
+    >>> context = compound_state.create_context(openmm.VerletIntegrator(1.0*unit.femtoseconds))
+    >>> context.getParameter('lambda_bonds')
+    0.0
+    >>> compound_state.lambda_bonds = 1.0
+    >>> compound_state.apply_to_context(context)
+    >>> context.getParameter('lambda_bonds')
+    1.0
+
+    You can express enslave global parameters to a mathematical expression
+    involving arbitrary variables.
+
+    >>> compound_state.set_function_variable('lambda', 1.0)
+    >>> compound_state.lambda_bonds = GlobalParameterFunction('2*(lambda - 0.5) * step(lambda - 0.5)')
+    >>> for l in [0.5, 0.75, 1.0]:
+    ...     compound_state.set_function_variable('lambda', l)
+    ...     print(compound_state.lambda_bonds)
+    0.0
+    0.5
+    1.0
+
+    If you need to control similar forces with the same state object,
+    this parent class provides a suffix mechanism to control different
+    global variables with the same state object. This allows to reuse
+    the same logic to control multiple objects
+
+    >>> # Add a second custom force using similar global parameters.
+    >>> custom_force = openmm.CustomBondForce('lambda_bonds_mysuffix*20000*(r-0.15)^2;')
+    >>> parameter_idx = custom_force.addGlobalParameter('lambda_bonds_mysuffix', 1.0)  # Default value is 1.0.
+    >>> bond_idx = custom_force.addBond(0, 1, [])
+    >>> force_idx = system.addForce(custom_force)
+    >>> # Create a state controlling the modified global parameter.
+    >>> my_composable_state = MyComposableState(parameters_name_suffix='mysuffix', lambda_bonds=0.0)
+    >>> my_composable_state.lambda_bonds_mysuffix = 1.0
+    >>> my_composable_state.gamma_mysuffix is None
+    True
+    >>> my_composable_state.apply_to_system(system)
+    >>> # The unmodified parameter becomes unaccessible.
+    >>> my_composable_state.apply_to_system(system)
+    >>> my_composable_state.lambda_bonds
+    Traceback (most recent call last):
+    ...
+    AttributeError: This state does not control lambda_bonds but lambda_bonds_mysuffix.
+
+    Note also in the example above that the forces don't need to define
+    all the global parameters controlled by the state. The state object
+    will perform some check to ensure that you won't try to set an undefined
+    parameter.
+
+    >>> my_composable_state.gamma_mysuffix = 2
+    >>> my_composable_state.apply_to_system(system)
+    Traceback (most recent call last):
+    ...
+    GlobalParameterError: Could not find global parameter gamma_mysuffix in the system.
+
+    """
+
+    # This constant can be overwritten by inheriting classes to
+    # raise a custom exception class when an error is encountered.
+    _GLOBAL_PARAMETER_ERROR = GlobalParameterError
+
+    def __init__(self, parameters_name_suffix=None, **kwargs):
+        self._initialize(parameters_name_suffix=parameters_name_suffix, **kwargs)
+
+    @classmethod
+    def from_system(cls, system, parameters_name_suffix=None):
+        """Static constructor reading the state from an OpenMM System.
+
+        Parameters
+        ----------
+        system : simtk.openmm.System
+            An OpenMM ``System`` object defining a non-empty subset
+            of global parameters controlled by this state.
+        parameters_name_suffix : str, optional
+            If specified, the state will search for a modified
+            version of the global parameters with the name
+            ``parameter_name + '_' + parameters_name_suffix``.
+
+        Returns
+        -------
+        The GlobalParameterState object representing the state of the system.
+
+        Raises
+        ------
+        GlobalParameterStateError
+            If the same parameter has different values in the system, or
+            if the system has no lambda parameters.
+
+        """
+        state_parameters = {}
+        for force, parameter_name, parameter_id in cls._get_system_controlled_parameters(
+                system, parameters_name_suffix):
+            parameter_value = force.getGlobalParameterDefaultValue(parameter_id)
+
+            # Check that we haven't already found
+            # the parameter with a different value.
+            if parameter_name in state_parameters:
+                if state_parameters[parameter_name] != parameter_value:
+                    err_msg = ('Parameter {} has been found twice (Force {}) with two values: '
+                               '{} and {}').format(parameter_name, force.__class__.__name__,
+                                                   parameter_value, state_parameters[parameter_name])
+                    raise cls._GLOBAL_PARAMETER_ERROR(err_msg)
+            else:
+                state_parameters[parameter_name] = parameter_value
+
+        # Check that the system can be controlled by this state..
+        if len(state_parameters) == 0:
+            err_msg = 'System has no global parameters controlled by this state.'
+            raise cls._GLOBAL_PARAMETER_ERROR(err_msg)
+
+        # Create and return the GlobalParameterState. The constructor of
+        # GlobalParameterState takes the parameters without the suffix so
+        # we left them undefined in the constructor and assign the attributes.
+        state = cls(parameters_name_suffix)
+        for parameter_name, parameter_value in state_parameters.items():
+            setattr(state, parameter_name, parameter_value)
+        return state
+
+    # -------------------------------------------------------------------------
+    # Function variables
+    # -------------------------------------------------------------------------
+
+    def get_function_variable(self, variable_name):
+        """Return the value of the function variable.
+
+        Function variables are _not_ global parameters but rather variables
+        entering mathematical expressions specified with ``GlobalParameterFunction``,
+        which can be use to enslave global parameter to arbitrary variables.
+
+        Parameters
+        ----------
+        variable_name : str
+            The name of the function variable.
+
+        Returns
+        -------
+        variable_value : float
+            The value of the function variable.
+
+        """
+        try:
+            variable_value = self._function_variables[variable_name]
+        except KeyError:
+            err_msg = 'Unknown function variable {}'.format(variable_name)
+            raise self._GLOBAL_PARAMETER_ERROR(err_msg)
+        return variable_value
+
+    def set_function_variable(self, variable_name, new_value):
+        """Set the value of the function variable.
+
+        Function variables are _not_ global parameters but rather variables
+        entering mathematical expressions specified with ``GlobalParameterFunction``,
+        which can be use to enslave global parameter to arbitrary variables.
+
+        Parameters
+        ----------
+        variable_name : str
+            The name of the function variable.
+        new_value : float
+            The new value for the variable.
+
+        """
+        forbidden_variable_names = set(self._parameters)
+        if variable_name in forbidden_variable_names:
+            err_msg = ('Cannot have an function variable with the same name '
+                       'of the predefined global parameter {}.'.format(variable_name))
+            raise self._GLOBAL_PARAMETER_ERROR(err_msg)
+        # Check that the new value is a scalar,
+        if not (np.isreal(new_value) and np.isscalar(new_value)):
+            err_msg = 'Only integers and floats can be assigned to a function variable.'
+            raise self._GLOBAL_PARAMETER_ERROR(err_msg)
+        self._function_variables[variable_name] = new_value
+
+    # -------------------------------------------------------------------------
+    # Operators
+    # -------------------------------------------------------------------------
+
+    def __eq__(self, other):
+        """Equality operator.
+
+        Two GlobalParameterState are equal if they control the same global
+        parameters and they all have the same values. This way the operator
+        preserves the commutative property.
+
+        """
+        # Check if other is a global parameter state.
+        if not isinstance(other, GlobalParameterState):
+            return False
+        # Check that they define the same parameters.
+        if not set(self._parameters) == set(other._parameters):
+            return False
+        # Check that all values are the same
+        is_equal = True
+        for parameter_name in self._parameters:
+            self_value = getattr(self, parameter_name)
+            other_value = getattr(other, parameter_name)
+            is_equal = is_equal and self_value == other_value
+        return is_equal
+
+    def __ne__(self, other):
+        # TODO: we can safely remove this when dropping support for Python 2
+        return not self == other
+
+    def __str__(self):
+        return str(self._parameters)
+
+    # -------------------------------------------------------------------------
+    # Global parameters descriptor class.
+    # -------------------------------------------------------------------------
+
+    # The global parameter descriptor makes it easy for the user to
+    # create their own state classes. The set of controlled parameters is
+    # dynamically discovered by _get_controlled_parameters() by checking
+    # which descriptors are GlobalParameter objects.
+
+    class GlobalParameter(object):
+        """Descriptor for a global parameter.
+
+        Parameters
+        ----------
+        parameter_name : str
+            The name of the global parameter.
+        standard_value : float
+            The value of the global parameter in the standard state. This
+            is used to define the concept of compatible states (i.e. whether
+            a ``System`` or ``Context`` can be transformed from a state
+            to another).
+        validator : callable, optional
+            A function to call before setting a new value with signature
+            ``validator(self, instance, new_value) -> validated_value``.
+            It is also possible to define this through the ``validator``
+            decorator.
+
+        """
+        def __init__(self, parameter_name, standard_value, validator=None):
+            self.parameter_name = parameter_name
+            self.standard_value = standard_value
+            self.validator_func = validator
+
+        def __get__(self, instance, owner_class=None):
+            self._check_controlled(instance)
+            return instance._get_global_parameter_value(self.parameter_name, self)
+
+        def __set__(self, instance, new_value):
+            self._check_controlled(instance)
+            instance._set_global_parameter_value(self.parameter_name, new_value, self)
+
+        def validator(self, validator):
+            return self.__class__(self.parameter_name, self.standard_value, validator)
+
+        def _check_controlled(self, instance):
+            """Raise GlobalParameterError if the parameter is not controlled by the state.
+
+            If the state uses a parameter name suffix, the normal parameter
+            name is not accessible.
+            """
+            if instance._parameters_name_suffix is not None:
+                suffixed_parameter_name = self.parameter_name + '_' + instance._parameters_name_suffix
+                err_msg = 'This state does not control {} but {}.'.format(
+                    self.parameter_name, suffixed_parameter_name)
+                raise AttributeError(err_msg)
+
+    # -------------------------------------------------------------------------
+    # Internal usage: IComposableState interface
+    # -------------------------------------------------------------------------
+
+    def apply_to_system(self, system):
+        """Set the state of the system to this.
+
+        Parameters
+        ----------
+        system : simtk.openmm.System
+            The system to modify.
+
+        Raises
+        ------
+        GlobalParameterError
+            If the system does not defined some of the global parameters
+            controlled by this state.
+
+        """
+        parameters_applied = set()
+        for force, parameter_name, parameter_id in self._get_system_controlled_parameters(
+                system, self._parameters_name_suffix):
+            parameter_value = getattr(self, parameter_name)
+            if parameter_value is None:
+                err_msg = 'The system parameter {} is not defined in this state.'
+                raise self._GLOBAL_PARAMETER_ERROR(err_msg.format(parameter_name))
+            else:
+                parameters_applied.add(parameter_name)
+                force.setGlobalParameterDefaultValue(parameter_id, parameter_value)
+
+        # Check that we set all the defined parameters.
+        for parameter_name in self._get_controlled_parameters(self._parameters_name_suffix):
+            if (self._parameters[parameter_name] is not None and
+                    parameter_name not in parameters_applied):
+                err_msg = 'Could not find global parameter {} in the system.'
+                raise self._GLOBAL_PARAMETER_ERROR(err_msg.format(parameter_name))
+
+    def check_system_consistency(self, system):
+        """Check if the system is in this state.
+
+        It raises a GlobalParameterError if the system is not consistent
+        with this state.
+
+        Parameters
+        ----------
+        system : simtk.openmm.System
+            The system to test.
+
+        Raises
+        ------
+        GlobalParameterError
+            If the system is not consistent with this state.
+
+        """
+        system_state = self.__class__.from_system(system, self._parameters_name_suffix)
+
+        # Check if parameters are all the same.
+        if self != system_state:
+            err_msg = ('Consistency check failed:\n'
+                       '\tSystem parameters {}\n'
+                       '\t{} parameters {}')
+            class_name = self.__class__.__name__
+            raise self._GLOBAL_PARAMETER_ERROR(err_msg.format(system_state, class_name, self))
+
+    def apply_to_context(self, context):
+        """Put the Context into this state.
+
+        Parameters
+        ----------
+        context : simtk.openmm.Context
+            The context to set.
+
+        Raises
+        ------
+        GlobalParameterError
+            If the context does not have the required global parameters.
+
+        """
+        context_parameters = context.getParameters()
+
+        # Set the global parameters in Context.
+        for parameter_name in self._parameters:
+            parameter_value = getattr(self, parameter_name)
+            if parameter_value is None:
+                # Check that Context does not have this parameter.
+                if parameter_name in context_parameters:
+                    err_msg = 'Context has parameter {} which is undefined in this state.'
+                    raise self._GLOBAL_PARAMETER_ERROR(err_msg.format(parameter_name))
+                continue
+            try:
+                context.setParameter(parameter_name, parameter_value)
+            except Exception:
+                err_msg = 'Could not find parameter {} in context'
+                raise self._GLOBAL_PARAMETER_ERROR(err_msg.format(parameter_name))
+
+    def _standardize_system(self, system):
+        """Standardize the given system.
+
+        Set all global parameters of the system their standard value.
+
+        Parameters
+        ----------
+        system : simtk.openmm.System
+            The system to standardize.
+
+        Raises
+        ------
+        GlobalParameterError
+            If the system is not consistent with this state.
+
+        """
+        # Collect all the global parameters' standard values.
+        standard_values = {}
+        controlled_parameters = self._get_controlled_parameters(self._parameters_name_suffix)
+        for parameter_name, parameter_descriptor in controlled_parameters.items():
+            standard_values[parameter_name] = parameter_descriptor.standard_value
+
+        # Create a standard state.
+        standard_state = copy.deepcopy(self)
+        for parameter_name, standard_value in standard_values.items():
+            # Skip undefined parameters.
+            if getattr(standard_state, parameter_name) is not None:
+                setattr(standard_state, parameter_name, standard_value)
+
+        # Standardize the system.
+        standard_state.apply_to_system(system)
+
+    def _on_setattr(self, standard_system, attribute_name, old_global_parameter_state):
+        """Check if the standard system needs changes after a state attribute is set.
+
+        Parameters
+        ----------
+        standard_system : simtk.openmm.System
+            The standard system before setting the attribute.
+        attribute_name : str
+            The name of the attribute that has just been set or retrieved.
+        old_global_parameter_state : GlobalParameterState
+            A copy of the composable state before the attribute was set.
+
+        Returns
+        -------
+        need_changes : bool
+            True if the standard system has to be updated, False if no change
+            occurred.
+
+        """
+        # There are no attributes that can be set that can alter the standard system,
+        # but if a parameter goes from defined to undefined, we should raise an error.
+        old_attribute_value = getattr(old_global_parameter_state, attribute_name)
+        new_attribute_value = getattr(self, attribute_name)
+        if (old_attribute_value is None) != (new_attribute_value is None):
+            err_msg = 'Cannot set the parameter {} in the system from {} to {}'.format(
+                attribute_name, old_attribute_value, new_attribute_value)
+            # Set back old value to maintain a consistent state in case the exception
+            # is catched. If this attribute was associated to a GlobalParameterFunction,
+            # we need to retrieve the original function object before setting.
+            old_attribute_value = old_global_parameter_state._get_global_parameter_value(
+                attribute_name, resolve_function=None)
+            setattr(self, attribute_name, old_attribute_value)
+            raise self._GLOBAL_PARAMETER_ERROR(err_msg)
+        return False
+
+    def _find_force_groups_to_update(self, context, current_context_state, memo):
+        """Find the force groups whose energy must be recomputed after applying self.
+
+        Parameters
+        ----------
+        context : Context
+            The context, currently in `current_context_state`, that will
+            be moved to this state.
+        current_context_state : ThermodynamicState
+            The full thermodynamic state of the given context. This is
+            guaranteed to be compatible with self.
+        memo : dict
+            A dictionary that can be used by the state for memoization
+            to speed up consecutive calls on the same context.
+
+        Returns
+        -------
+        force_groups_to_update : set of int
+            The indices of the force groups whose energy must be computed
+            again after applying this state, assuming the context to be in
+            `current_context_state`.
+        """
+        # Cache information about system force groups.
+        # We create a dictionary "memo" mapping parameter_name -> list of force groups to update.
+        if len(memo) == 0:
+            system = context.getSystem()
+            system_parameters = self._get_system_controlled_parameters(system, self._parameters_name_suffix)
+            for force, parameter_name, _ in system_parameters:
+                # Keep track of valid parameters only.
+                if self._parameters[parameter_name] is not None:
+                    try:
+                        memo[parameter_name].append(force.getForceGroup())
+                    except KeyError:
+                        memo[parameter_name] = [force.getForceGroup()]
+
+        # Find lambda parameters that will change.
+        force_groups_to_update = set()
+        for parameter_name, force_groups in memo.items():
+            self_parameter_value = getattr(self, parameter_name)
+            current_parameter_value = getattr(current_context_state, parameter_name)
+            if self_parameter_value != current_parameter_value:
+                force_groups_to_update.update(force_groups)
+        return force_groups_to_update
+
+    # -------------------------------------------------------------------------
+    # Internal usage: Attributes handling
+    # -------------------------------------------------------------------------
+
+    @classmethod
+    def _get_controlled_parameters(cls, parameters_name_suffix=None):
+        """Return a set of the global parameters controlled by the state class.
+
+        This is constructed dynamically by introspection gathering all the
+        descriptors that belong to the GlobalParameter class.
+
+        Parameters
+        ----------
+        parameters_name_suffix : str, optional
+            If specified, this returns the set of parameter names with the
+            name suffix.
+
+        Returns
+        -------
+        controlled_parameters : dict of str -> GlobalParameter
+            A map from the name of the controlled parameter to the
+            GlobalParameter descriptor handling it.
+
+        """
+        if parameters_name_suffix is None:
+            suffix = ''
+        else:
+            suffix = '_' + parameters_name_suffix
+        # TODO just use inspect.getmembers when dropping Python 2 which automatically resolves the MRO.
+        # controlled_parameters = {name + suffix: descriptor for name, descriptor in inspect.getmembers(cls)
+        #                          if isinstance(descriptor, cls.GlobalParameter)}
+        controlled_parameters = {name + suffix: descriptor for c in inspect.getmro(cls)
+                                 for name, descriptor in c.__dict__.items()
+                                 if isinstance(descriptor, cls.GlobalParameter)}
+        return controlled_parameters
+
+    def _validate_global_parameter(self, parameter_name, parameter_value, descriptor=None):
+        """Return the validated parameter value using the descriptor validator.
+
+        Parameters
+        ----------
+        parameter_name : str
+            Parameter name (with eventual suffix) to validate.
+        parameter_value : float
+            Parameter value to validate. If a GlobalParameterFunction is associated
+            to the parameter, this must be evaluated before calling this.
+        descriptor : GlobalParameterState.GlobalParameter, optional
+            If None, the functions automatically looks for the descriptor associated
+            to this parameter and calls its validator (if any). This search is
+            skipped if this argument is provided.
+
+        Returns
+        -------
+        validated_value : float
+            The validated value.
+
+        Raises
+        ------
+        KeyError
+            If parameter_name is not controlled by this state.
+        """
+        if descriptor is None:
+            # Get the descriptors of all controlled parameters.
+            controlled_parameters = self._get_controlled_parameters(self._parameters_name_suffix)
+            # Call validator, before setting the parameter. This raises KeyError.
+            descriptor = controlled_parameters[parameter_name]
+        if descriptor.validator_func is not None:
+            parameter_value = descriptor.validator_func(descriptor, self, parameter_value)
+        return parameter_value
+
+    def _get_global_parameter_value(self, parameter_name, descriptor=None, resolve_function=True):
+        """Retrieve the current value of a global parameter.
+
+        Parameters
+        ----------
+        parameter_name : str
+            Parameter name (with eventual suffix) to validate.
+        descriptor : GlobalParameterState.GlobalParameter, optional
+            If None, and the parameter is associated to a GlobalParameterFunction,
+            the functions automatically looks for the descriptor associated to this
+            parameter and calls its validator (if any). This search is skipped if
+            this argument is provided. Default is None.
+        resolve_function : bool, optional
+            If False and the parameter is associated to a GlobalParameterFunction,
+            the function is not evaluated (and its result is not validated), and
+            the GlobalParameterFunction object is returned instead. Default is True.
+
+        Returns
+        -------
+        parameter_value : float
+            The parameter value.
+
+        Raises
+        ------
+        KeyError
+            If parameter_name is not controlled by this state.
+        """
+        parameter_value = self._parameters[parameter_name]
+        if resolve_function and isinstance(parameter_value, GlobalParameterFunction):
+            parameter_value = parameter_value(self._function_variables)
+            # If the value is generated through a mathematical expression,
+            # we validate the value after the expression is evaluated rather
+            # than on setting.
+            parameter_value = self._validate_global_parameter(parameter_name, parameter_value, descriptor)
+        return parameter_value
+
+    def _set_global_parameter_value(self, parameter_name, new_value, descriptor=None):
+        """Set the value of a global parameter.
+
+        Parameters
+        ----------
+        parameter_name : str
+            Parameter name (with eventual suffix) to validate.
+        new_value : float or GlobalParameterFunction
+            The new parameter value.
+        descriptor : GlobalParameterState.GlobalParameter, optional
+            If None, and the parameter is not a GlobalParameterFunction, the functions
+            automatically looks for the descriptor associated to this parameter and
+            calls its validator (if any). This search is skipped if this argument is
+            provided.
+
+        Raises
+        ------
+        KeyError
+            If parameter_name is not controlled by this state.
+
+        """
+        # Check if the parameter is defined and raise KeyError otherwise.
+        if parameter_name not in self._parameters:
+            raise KeyError(parameter_name)
+        # If the value is generated through a mathematical expression,
+        # we validate the value after the expression is evaluated rather
+        # than on setting.
+        if not isinstance(new_value, GlobalParameterFunction):
+            new_value = self._validate_global_parameter(parameter_name, new_value, descriptor)
+        self._parameters[parameter_name] = new_value
+
+    def __getattr__(self, key):
+        """Handles global parameters with a suffix."""
+        # __getattr__ is called only if the item is not found in the
+        # usual ways, so we don't need to handle GlobalParameter here.
+        try:
+            parameter_value = self._get_global_parameter_value(key)
+        except KeyError:
+            # Parameter not found, fall back to normal behavior.
+            parameter_value = super(GlobalParameterState, self).__getattribute__(key)
+        return parameter_value
+
+    def __setattr__(self, key, value):
+        """Handles global parameters with a suffix."""
+        # Check if the object has been initialized and we can
+        # start resolving dynamically suffixed parameters.
+        if '_parameters_name_suffix' in self.__dict__ and self._parameters_name_suffix is not None:
+            try:
+                self._set_global_parameter_value(key, value)
+            except KeyError:
+                pass
+            else:
+                return
+        # This is not a "suffixed" parameter. Fallback to normal behavior.
+        super(GlobalParameterState, self).__setattr__(key, value)
+
+    @classmethod
+    def _get_system_controlled_parameters(cls, system, parameters_name_suffix):
+        """Yields the controlled global parameters defined in the System.
+
+        Yields
+        ------
+        A tuple force, parameter_name, parameter_index for each supported
+        lambda parameter.
+
+        """
+        searched_parameters = cls._get_controlled_parameters(parameters_name_suffix)
+
+        # Retrieve all the forces with global supported parameters.
+        for force_index in range(system.getNumForces()):
+            force = system.getForce(force_index)
+            try:
+                n_global_parameters = force.getNumGlobalParameters()
+            except AttributeError:
+                continue
+            for parameter_id in range(n_global_parameters):
+                parameter_name = force.getGlobalParameterName(parameter_id)
+                if parameter_name in searched_parameters:
+                    yield force, parameter_name, parameter_id
+
+    def __getstate__(self):
+        """Return a dictionary representation of the state."""
+        serialization = dict(
+            parameters={},
+            function_variables=self._function_variables.copy(),
+            parameters_name_suffix=self._parameters_name_suffix
+        )
+        # Copy parameters. We serialize the parameters with their original name
+        # (i.e., without suffix) because we'll pass them to _initialize().
+        if self._parameters_name_suffix is None:
+            suffix = ''
+        else:
+            suffix = '_' + self._parameters_name_suffix
+        for parameter_name in self._get_controlled_parameters():
+            parameter_value = self._parameters[parameter_name + suffix]
+            # Convert global parameter function into string expressions.
+            if isinstance(parameter_value, GlobalParameterFunction):
+                parameter_value = parameter_value._expression
+            serialization['parameters'][parameter_name] = parameter_value
+        return serialization
+
+    def __setstate__(self, serialization):
+        """Set the state from a dictionary representation."""
+        parameters = serialization['parameters']
+        # parameters_name_suffix is optional for backwards compatibility since openmmtools 0.16.0.
+        parameters_name_suffix = serialization.get('parameters_name_suffix', None)
+        # Global parameter functions has been added in openmmtools 0.17.0.
+        function_variables = serialization.get('function_variables', {})
+
+        # Temporarily store global parameter functions.
+        global_parameter_functions = {}
+        for parameter_name, value in parameters.items():
+            if isinstance(value, str):
+                global_parameter_functions[parameter_name] = value
+                parameters[parameter_name] = None
+
+        # Initialize parameters and add all function variables.
+        self._initialize(parameters_name_suffix=parameters_name_suffix, **parameters)
+        for variable_name, value in function_variables.items():
+            self.set_function_variable(variable_name, value)
+
+        # Add global parameter functions.
+        if parameters_name_suffix is not None:
+            parameters_name_suffix = '_' + parameters_name_suffix
+        else:
+            parameters_name_suffix = ''
+        for parameter_name, expression in global_parameter_functions.items():
+            setattr(self, parameter_name + parameters_name_suffix, GlobalParameterFunction(expression))
+
+    # -------------------------------------------------------------------------
+    # Internal usage: Initialization
+    # -------------------------------------------------------------------------
+
+    def _initialize(self, parameters_name_suffix=None, **kwargs):
+        """Initialize the state.
+
+        It takes the global parameters and their values as keywords arguments.
+        Controlled parameters that are not passed are left undefined (i.e. are
+        set to None).
+        """
+        self._function_variables = {}
+        # Get controlled parameters from introspection.
+        controlled_parameters = set(self._get_controlled_parameters())
+
+        # Check for unknown parameters
+        unknown_parameters = set(kwargs) - controlled_parameters
+        if len(unknown_parameters) > 0:
+            err_msg = "Unknown parameters {}".format(unknown_parameters)
+            raise self._GLOBAL_PARAMETER_ERROR(err_msg)
+
+        # Append suffix to parameters before storing them internally.
+        if parameters_name_suffix is not None:
+            kwargs = {key + '_' + parameters_name_suffix: value for key, value in kwargs.items()}
+            controlled_parameters = {key + '_' + parameters_name_suffix for key in controlled_parameters}
+
+        # Default value for all parameters is None.
+        self._parameters = dict.fromkeys(controlled_parameters, None)
+
+        # This signals to __setattr__ that we can start resolving dynamically
+        # suffixed parameters so it should be the last direct assignment.
+        self._parameters_name_suffix = parameters_name_suffix
+
+        # Update parameters with constructor arguments.
+        for parameter_name, value in kwargs.items():
+            setattr(self, parameter_name, value)
 
 
 if __name__ == '__main__':

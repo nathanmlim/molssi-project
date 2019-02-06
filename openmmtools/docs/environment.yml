@@ -1,15 +1,17 @@
 name: openmmtools
 channels:
+    - conda-forge
     - omnia
+    - omnia/label/rc
 dependencies:
     - python
-    - cython
+    - setuptools
+    - openmm >=7.3
     - numpy
     - scipy
-    - setuptools
     - six
-    - openmm
     - parmed
+    - mdtraj
     - numpydoc
     - netCDF4
     - pyyaml

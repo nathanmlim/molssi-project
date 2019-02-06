@@ -2,6 +2,7 @@
 # ============================================================================================
 # MODULE DOCSTRING
 # ============================================================================================
+
 """
 Custom integrators for molecular simulation.
 
@@ -51,7 +52,6 @@ _OPENMM_ENERGY_UNIT = unit.kilojoules_per_mole
 # BASE CLASSES
 # ============================================================================================
 
-
 class PrettyPrintableIntegrator(object):
     """A PrettyPrintableIntegrator can format the contents of its step program for printing.
 
@@ -60,7 +60,6 @@ class PrettyPrintableIntegrator(object):
     TODO: We should check that the object (`self`) is a CustomIntegrator or subclass.
 
     """
-
     def pretty_format(self, as_list=False, step_types_to_highlight=None):
         """Generate a human-readable version of each integrator step.
 
@@ -78,7 +77,7 @@ class PrettyPrintableIntegrator(object):
            A list of human-readable versions of each step of the integrator
         """
         step_type_dict = {
-            0: "{target} <- {expr}",
+            0 : "{target} <- {expr}",
             1: "{target} <- {expr}",
             2: "{target} <- sum({expr})",
             3: "constrain positions",
@@ -97,14 +96,12 @@ class PrettyPrintableIntegrator(object):
         for step in range(self.getNumComputations()):
             line = ''
             step_type, target, expr = self.getComputationStep(step)
-            highlight = True if (step_types_to_highlight is
-                                 not None) and (step_type in step_types_to_highlight) else False
+            highlight = True if (step_types_to_highlight is not None) and (step_type in step_types_to_highlight) else False
             if step_type in [8]:
                 indent_level -= 1
             if highlight:
                 line += '\x1b[6;30;42m'
-            line += 'step {:6d} : '.format(step) + '   ' * indent_level + step_type_dict[step_type].format(
-                target=target, expr=expr)
+            line += 'step {:6d} : '.format(step) + '   ' * indent_level + step_type_dict[step_type].format(target=target, expr=expr)
             if highlight:
                 line += '\x1b[0m'
             if step_type in [6, 7]:
@@ -121,7 +118,8 @@ class PrettyPrintableIntegrator(object):
         print(self.pretty_format())
 
 
-class ThermostatedIntegrator(utils.RestorableOpenMMObject, PrettyPrintableIntegrator, mm.CustomIntegrator):
+class ThermostatedIntegrator(utils.RestorableOpenMMObject, PrettyPrintableIntegrator,
+                             mm.CustomIntegrator):
     """Add temperature functions to a CustomIntegrator.
 
     This class is intended to be inherited by integrators that maintain the
@@ -191,7 +189,6 @@ class ThermostatedIntegrator(utils.RestorableOpenMMObject, PrettyPrintableIntegr
     True
 
     """
-
     def __init__(self, temperature, *args, **kwargs):
         super(ThermostatedIntegrator, self).__init__(*args, **kwargs)
         self.addGlobalVariable('kT', kB * temperature)  # thermal energy
@@ -319,6 +316,7 @@ class ThermostatedIntegrator(utils.RestorableOpenMMObject, PrettyPrintableIntegr
 
 
 class MTSIntegrator(respa.MTSIntegrator):
+
     """
     MTSIntegrator implements the rRESPA multiple time step integration algorithm.
 
@@ -358,6 +356,7 @@ class MTSIntegrator(respa.MTSIntegrator):
 
 
 class DummyIntegrator(mm.CustomIntegrator):
+
     """
     Construct a dummy integrator that does nothing except update call the force updates.
 
@@ -384,6 +383,7 @@ class DummyIntegrator(mm.CustomIntegrator):
 
 
 class GradientDescentMinimizationIntegrator(mm.CustomIntegrator):
+
     """Simple gradient descent minimizer implemented as an integrator.
 
     Examples
@@ -451,6 +451,7 @@ class GradientDescentMinimizationIntegrator(mm.CustomIntegrator):
 
 
 class VelocityVerletIntegrator(mm.CustomIntegrator):
+
     """Verlocity Verlet integrator.
 
     Notes
@@ -495,6 +496,7 @@ class VelocityVerletIntegrator(mm.CustomIntegrator):
 
 
 class AndersenVelocityVerletIntegrator(ThermostatedIntegrator):
+
     """Velocity Verlet integrator with Andersen thermostat using per-particle collisions (rather than massive collisions).
 
     References
@@ -519,10 +521,7 @@ class AndersenVelocityVerletIntegrator(ThermostatedIntegrator):
 
     """
 
-    def __init__(self,
-                 temperature=298 * unit.kelvin,
-                 collision_rate=91.0 / unit.picoseconds,
-                 timestep=1.0 * unit.femtoseconds):
+    def __init__(self, temperature=298 * unit.kelvin, collision_rate=91.0 / unit.picoseconds, timestep=1.0 * unit.femtoseconds):
         """Construct a velocity Verlet integrator with Andersen thermostat, implemented as per-particle collisions (rather than massive collisions).
 
         Parameters
@@ -540,8 +539,7 @@ class AndersenVelocityVerletIntegrator(ThermostatedIntegrator):
         #
         # Integrator initialization.
         #
-        self.addGlobalVariable("p_collision",
-                               timestep * collision_rate)  # per-particle collision probability per timestep
+        self.addGlobalVariable("p_collision", timestep * collision_rate)  # per-particle collision probability per timestep
         self.addPerDofVariable("sigma_v", 0)  # velocity distribution stddev for Maxwell-Boltzmann (computed later)
         self.addPerDofVariable("collision", 0)  # 1 if collision has occured this timestep, 0 otherwise
         self.addPerDofVariable("x1", 0)  # for constraints
@@ -550,11 +548,8 @@ class AndersenVelocityVerletIntegrator(ThermostatedIntegrator):
         # Update velocities from Maxwell-Boltzmann distribution for particles that collide.
         #
         self.addComputeTemperatureDependentConstants({"sigma_v": "sqrt(kT/m)"})
-        self.addComputePerDof("collision",
-                              "step(p_collision-uniform)")  # if collision has occured this timestep, 0 otherwise
-        self.addComputePerDof(
-            "v",
-            "(1-collision)*v + collision*sigma_v*gaussian")  # randomize velocities of particles that have collided
+        self.addComputePerDof("collision", "step(p_collision-uniform)")  # if collision has occured this timestep, 0 otherwise
+        self.addComputePerDof("v", "(1-collision)*v + collision*sigma_v*gaussian")  # randomize velocities of particles that have collided
 
         #
         # Velocity Verlet step
@@ -569,6 +564,7 @@ class AndersenVelocityVerletIntegrator(ThermostatedIntegrator):
 
 
 class NoseHooverChainVelocityVerletIntegrator(ThermostatedIntegrator):
+
     """Nosé-Hoover chain thermostat, using the reversible multi time step velocity Verlet algorithm
        detailed in the papers below.
 
@@ -589,6 +585,9 @@ class NoseHooverChainVelocityVerletIntegrator(ThermostatedIntegrator):
 
     Create a velocity Verlet integrator with Nosé-Hoover chain thermostat.
 
+    >>> from openmmtools import testsystems
+    >>> waterbox = testsystems.WaterBox()
+    >>> system = waterbox.system
     >>> timestep = 1.0 * unit.femtoseconds
     >>> temperature = 300 * unit.kelvin
     >>> chain_length = 10
@@ -596,7 +595,7 @@ class NoseHooverChainVelocityVerletIntegrator(ThermostatedIntegrator):
     >>> num_mts = 5
     >>> num_yoshidasuzuki = 5
 
-    >>> integrator = NoseHooverChainVelocityVerletIntegrator(temperature, collision_frequency, timestep, chain_length, num_mts, num_yoshidasuzuki)
+    >>> integrator = NoseHooverChainVelocityVerletIntegrator(system, temperature, collision_frequency, timestep, chain_length, num_mts, num_yoshidasuzuki)
 
     Notes
     ------
@@ -605,7 +604,9 @@ class NoseHooverChainVelocityVerletIntegrator(ThermostatedIntegrator):
 
     Useful tests of the NHC integrator can be performed by monitoring the instantaneous temperature during the simulation and confirming that conserved energy is constant to about 1 part in 10^5.  The instantanous temperature and particle kinetic and potential energies can already be extracted from a snapshot, for example see the OpenMM StateDataReporter implementation for more details.  This integrator also provides heat bath energies (kJ/mol) through the following mechanism:
 
-    >>> integrator = NoseHooverChainVelocityVerletIntegrator()
+    >>> waterbox = testsystems.WaterBox()
+    >>> system = waterbox.system
+    >>> integrator = NoseHooverChainVelocityVerletIntegrator(system)
     >>> heat_bath_kinetic_energy = integrator.getGlobalVariableByName('bathKE')
     >>> heat_bath_potential_energy = integrator.getGlobalVariableByName('bathPE')
 
@@ -613,24 +614,26 @@ class NoseHooverChainVelocityVerletIntegrator(ThermostatedIntegrator):
 
     """
 
+
     YSWeights = {
-        1: [1.0000000000000000],
-        3: [0.8289815435887510, -0.6579630871775020, 0.8289815435887510],
-        5: [0.2967324292201065, 0.2967324292201065, -0.1869297168804260, 0.2967324292201065, 0.2967324292201065]
+        1 : [ 1.0000000000000000 ],
+        3 : [ 0.8289815435887510, -0.6579630871775020,  0.8289815435887510 ],
+        5 : [ 0.2967324292201065,  0.2967324292201065, -0.1869297168804260, 0.2967324292201065, 0.2967324292201065 ]
     }
 
-    def __init__(self,
-                 temperature=298 * unit.kelvin,
-                 collision_frequency=50 / unit.picoseconds,
-                 timestep=0.001 * unit.picoseconds,
-                 chain_length=5,
-                 num_mts=5,
-                 num_yoshidasuzuki=5):
+    def __init__(self, system=None, temperature=298*unit.kelvin, collision_frequency=50/unit.picoseconds,
+                 timestep=0.001*unit.picoseconds, chain_length=5, num_mts=5, num_yoshidasuzuki=5):
         """ Construct a velocity Verlet integrator with Nosé-Hoover chain thermostat implemented with massive collisions.
 
         Parameters:
         -----------
 
+        system: openmm.app.System instance
+            Required to extract the system's number of degrees of freedom.
+            If the system is not passed to the constructor and has constraints
+            or a ``CMMotionRemover`` force, the temperature will converge to the
+            wrong value.
+                 
         temperature: unit.Quantity compatible with kelvin, default=298*unit.kelvin
             The target temperature for the thermostat.
 
@@ -664,32 +667,53 @@ class NoseHooverChainVelocityVerletIntegrator(ThermostatedIntegrator):
         #
         # Integrator initialization.
         #
-        self.n_c = num_mts
-        self.n_ys = num_yoshidasuzuki
+        self.n_c         = num_mts
+        self.n_ys        = num_yoshidasuzuki
         try:
-            self.weights = self.YSWeights[self.n_ys]
+            self.weights     = self.YSWeights[self.n_ys]
         except KeyError:
-            raise Exception(
-                "Invalid Yoshida-Suzuki value. Allowed values are: %s" % ",".join(map(str, self.YSWeights.keys())))
+            raise Exception("Invalid Yoshida-Suzuki value. Allowed values are: %s"%
+                             ",".join(map(str,self.YSWeights.keys())))
         if chain_length < 0:
             raise Exception("Nosé-Hoover chain length must be at least 0")
         if chain_length == 0:
-            print("WARNING: Nosé-Hoover chain length is 0; falling back to regular velocity verlet algorithm.")
-        self.M = chain_length
+            logger.warning('Nosé-Hoover chain length is 0; falling back to regular velocity verlet algorithm.')
+        self.M           = chain_length
 
         # Define the "mass" of the thermostat particles (multiply by ndf for particle 0)
         kT = self.getGlobalVariableByName('kT')
         frequency = collision_frequency.value_in_unit(unit.picoseconds**-1)
-        Q = kT / frequency**2
+        Q = kT/frequency**2
+
+        #
+        # Compute the number of degrees of freedom.
+        #
+        if system is None:
+            logger.warning('The system was not passed to the NoseHooverChainVelocityVerletIntegrator. '
+                           'For systems with constraints, the simulation will run at the wrong temperature.')
+            # Fall back to old scheme, which only works for unconstrained systems
+            self.addGlobalVariable("ndf", 0)
+            self.addPerDofVariable("ones", 1.0)
+            self.addComputeSum("ndf", "ones")
+        else:
+            # same as in openmm.app.StateDataReporter._initializeConstants
+            dof = 0
+            for i in range(system.getNumParticles()):
+                if system.getParticleMass(i) > 0*unit.dalton:
+                    dof += 3
+            dof -= system.getNumConstraints()
+            if any(type(system.getForce(i)) == mm.CMMotionRemover for i in range(system.getNumForces())):
+                dof -= 3
+
+            self.addGlobalVariable("ndf", dof)      # number of degrees of freedom
 
         #
         # Define global variables
         #
-        self.addGlobalVariable("ndf", 0)  # number of degrees of freedom
-        self.addGlobalVariable("bathKE", 0.0)  # Thermostat bath kinetic energy
-        self.addGlobalVariable("bathPE", 0.0)  # Thermostat bath potential energy
-        self.addGlobalVariable("KE2", 0.0)  # Twice the kinetic energy
-        self.addGlobalVariable("Q", Q)  # Thermostat particle "mass"
+        self.addGlobalVariable("bathKE", 0.0) # Thermostat bath kinetic energy
+        self.addGlobalVariable("bathPE", 0.0) # Thermostat bath potential energy
+        self.addGlobalVariable("KE2", 0.0)    # Twice the kinetic energy
+        self.addGlobalVariable("Q", Q)        # Thermostat particle "mass"
         self.addGlobalVariable("scale", 1.0)
         self.addGlobalVariable("aa", 0.0)
         self.addGlobalVariable("wdt", 0.0)
@@ -700,15 +724,13 @@ class NoseHooverChainVelocityVerletIntegrator(ThermostatedIntegrator):
         # Initialize thermostat parameters
         #
         for i in range(self.M):
-            self.addGlobalVariable("xi{}".format(i), 0)  # Thermostat particle
-            self.addGlobalVariable("vxi{}".format(i), 0)  # Thermostat particle velocities in ps^-1
-            self.addGlobalVariable("G{}".format(i), -frequency**2)  # Forces on thermostat particles in ps^-2
-            self.addGlobalVariable("Q{}".format(i), 0)  # Thermostat "masses" in ps^2 kJ/mol
+            self.addGlobalVariable("xi{}".format(i), 0)            # Thermostat particle
+            self.addGlobalVariable("vxi{}".format(i), 0)           # Thermostat particle velocities in ps^-1
+            self.addGlobalVariable("G{}".format(i), -frequency**2) # Forces on thermostat particles in ps^-2
+            self.addGlobalVariable("Q{}".format(i), 0)             # Thermostat "masses" in ps^2 kJ/mol
         # The masses need the number of degrees of freedom, which is approximated here.  Need a
         # better solution eventually, to properly account for constraints, translations, etc.
-        self.addPerDofVariable("ones", 1.0)
-        self.addPerDofVariable("x1", 0)
-        self.addComputeSum("ndf", "ones")
+        self.addPerDofVariable("x1", 0);
         if self.M:
             self.addComputeGlobal("Q0", "ndf*Q")
             for i in range(1, self.M):
@@ -737,26 +759,24 @@ class NoseHooverChainVelocityVerletIntegrator(ThermostatedIntegrator):
         for ncval in range(self.n_c):
             for nysval in range(self.n_ys):
                 self.addComputeGlobal("wdt", "w{}*dt/{}".format(nysval, self.n_c))
-                self.addComputeGlobal("vxi{}".format(self.M - 1), "vxi{} + 0.25*wdt*G{}".format(
-                    self.M - 1, self.M - 1))
-                for j in range(self.M - 2, -1, -1):
-                    self.addComputeGlobal("aa", "exp(-0.125*wdt*vxi{})".format(j + 1))
-                    self.addComputeGlobal("vxi{}".format(j), "aa*(aa*vxi{} + 0.25*wdt*G{})".format(j, j))
+                self.addComputeGlobal("vxi{}".format(self.M-1), "vxi{} + 0.25*wdt*G{}".format(self.M-1, self.M-1))
+                for j in range(self.M-2, -1, -1):
+                    self.addComputeGlobal("aa", "exp(-0.125*wdt*vxi{})".format(j+1))
+                    self.addComputeGlobal("vxi{}".format(j), "aa*(aa*vxi{} + 0.25*wdt*G{})".format(j,j))
                 # update particle velocities
                 self.addComputeGlobal("aa", "exp(-0.5*wdt*vxi0)")
                 self.addComputeGlobal("scale", "scale*aa")
                 # update the thermostat positions
                 for j in range(self.M):
-                    self.addComputeGlobal("xi{}".format(j), "xi{} + 0.5*wdt*vxi{}".format(j, j))
+                    self.addComputeGlobal("xi{}".format(j), "xi{} + 0.5*wdt*vxi{}".format(j,j))
                 # update the forces
                 self.addComputeGlobal("G0", "(scale*scale*KE2 - ndf*kT)/Q0")
                 # update thermostat velocities
-                for j in range(self.M - 1):
-                    self.addComputeGlobal("aa", "exp(-0.125*wdt*vxi{})".format(j + 1))
-                    self.addComputeGlobal("vxi{}".format(j), "aa*(aa*vxi{} + 0.25*wdt*G{})".format(j, j))
-                    self.addComputeGlobal("G{}".format(j + 1), "(Q{}*vxi{}*vxi{} - kT)/Q{}".format(j, j, j, j + 1))
-                self.addComputeGlobal("vxi{}".format(self.M - 1), "vxi{} + 0.25*wdt*G{}".format(
-                    self.M - 1, self.M - 1))
+                for j in range(self.M-1):
+                    self.addComputeGlobal("aa", "exp(-0.125*wdt*vxi{})".format(j+1))
+                    self.addComputeGlobal("vxi{}".format(j), "aa*(aa*vxi{} + 0.25*wdt*G{})".format(j,j))
+                    self.addComputeGlobal("G{}".format(j+1), "(Q{}*vxi{}*vxi{} - kT)/Q{}".format(j,j,j,j+1))
+                self.addComputeGlobal("vxi{}".format(self.M-1), "vxi{} + 0.25*wdt*G{}".format(self.M-1, self.M-1))
         # update particle velocities
         self.addComputePerDof("v", "scale*v")
 
@@ -765,15 +785,16 @@ class NoseHooverChainVelocityVerletIntegrator(ThermostatedIntegrator):
         # Bath kinetic energy
         self.addComputeGlobal("bathKE", "0.0")
         for i in range(self.M):
-            self.addComputeGlobal("bathKE", "bathKE + 0.5*Q{}*vxi{}^2".format(i, i))
+            self.addComputeGlobal("bathKE", "bathKE + 0.5*Q{}*vxi{}^2".format(i,i))
         # Bath potential energy
         self.addComputeGlobal("bathPE", "ndf*xi0")
-        for i in range(1, self.M):
+        for i in range(1,self.M):
             self.addComputeGlobal("bathPE", "bathPE + xi{}".format(i))
         self.addComputeGlobal("bathPE", "kT*bathPE")
 
 
 class MetropolisMonteCarloIntegrator(ThermostatedIntegrator):
+
     """
     Metropolis Monte Carlo with Gaussian displacement trials.
 
@@ -859,6 +880,7 @@ class MetropolisMonteCarloIntegrator(ThermostatedIntegrator):
 
 
 class HMCIntegrator(ThermostatedIntegrator):
+
     """
     Hybrid Monte Carlo (HMC) integrator.
 
@@ -1043,16 +1065,15 @@ class LangevinIntegrator(ThermostatedIntegrator):
 
     _kinetic_energy = "0.5 * m * v * v"
 
-    def __init__(
-            self,
-            temperature=298.0 * unit.kelvin,
-            collision_rate=1.0 / unit.picoseconds,
-            timestep=1.0 * unit.femtoseconds,
-            splitting="V R O R V",
-            constraint_tolerance=1e-8,
-            measure_shadow_work=False,
-            measure_heat=False,
-    ):
+    def __init__(self,
+                 temperature=298.0 * unit.kelvin,
+                 collision_rate=1.0 / unit.picoseconds,
+                 timestep=1.0 * unit.femtoseconds,
+                 splitting="V R O R V",
+                 constraint_tolerance=1e-8,
+                 measure_shadow_work=False,
+                 measure_heat=False,
+                 ):
         """Create a Langevin integrator with the prescribed operator splitting.
 
         Parameters
@@ -1090,15 +1111,15 @@ class LangevinIntegrator(ThermostatedIntegrator):
 
         # Check if integrator is metropolized by checking for M step:
         if splitting.find("{") > -1:
-            metropolized_integrator = True
+            self._metropolized_integrator = True
             # We need to measure shadow work if Metropolization is used
             measure_shadow_work = True
         else:
-            metropolized_integrator = False
+            self._metropolized_integrator = False
 
         # Record whether we are measuring heat and shadow work
-        #self._measure_heat = measure_heat
-        #self._measure_shadow_work = measure_shadow_work
+        self._measure_heat = measure_heat
+        self._measure_shadow_work = measure_shadow_work
 
         ORV_counts, mts, force_group_nV = self._parse_splitting_string(splitting)
 
@@ -1119,7 +1140,7 @@ class LangevinIntegrator(ThermostatedIntegrator):
         self.addGlobalVariable("a", np.exp(-gamma * h))
 
         # Velocity mixing parameter: random velocity component
-        self.addGlobalVariable("b", np.sqrt(1 - np.exp(-2 * gamma * h)))
+        self.addGlobalVariable("b", np.sqrt(1 - np.exp(- 2 * gamma * h)))
 
         # Positions before application of position constraints
         self.addPerDofVariable("x1", 0)
@@ -1148,8 +1169,6 @@ class LangevinIntegrator(ThermostatedIntegrator):
 
     def _add_global_variables(self):
         """Add global bookkeeping variables."""
-        #self.addGlobalVariable('step', 0)
-
         if self._measure_heat:
             self.addGlobalVariable("heat", 0)
 
@@ -1237,53 +1256,13 @@ class LangevinIntegrator(ThermostatedIntegrator):
            If dimensionless=True, the protocol work in kT (float).
            Otherwise, the unit-bearing protocol work in units of energy.
         """
-        try:
-            return self._get_energy_with_units("shadow_work", dimensionless=dimensionless)
-        except:
-            #if not self._measure_shadow_work:
-            raise Exception(
-                "This integrator must be constructed with 'measure_shadow_work=True' to measure shadow work.")
-        #return self._get_energy_with_units("shadow_work", dimensionless=dimensionless)
-
-    @property
-    def _metropolized_integrator(self):
-        try:
-            self.getGlobalVariableByName('ntrials')
-            self.getGlobalVariableByName('naccept')
-            self.getGlobalVariableByName('nreject')
-        except:
-            return False
-        return True
-
-    @property
-    def _measure_shadow_work(self):
-        try:
-            self.getGlobalVariableByName('shadow_work')
-        except:
-            return False
-        return True
-
-    @property
-    def _measure_heat(self):
-        try:
-            self.getGlobalVariableByName('heat')
-        except:
-            return False
-        return True
+        if not self._measure_shadow_work:
+            raise Exception("This integrator must be constructed with 'measure_shadow_work=True' to measure shadow work.")
+        return self._get_energy_with_units("shadow_work", dimensionless=dimensionless)
 
     @property
     def shadow_work(self):
         return self.get_shadow_work()
-
-    @property
-    def step(self):
-        return self.get_step()
-
-    def get_step(self):
-        try:
-            return self.getGlobalVariableByName('step')
-        except Exception as e:
-            raise e
 
     def get_heat(self, dimensionless=False):
         """Get the current accumulated heat.
@@ -1299,13 +1278,9 @@ class LangevinIntegrator(ThermostatedIntegrator):
            If dimensionless=True, the heat in kT (float).
            Otherwise, the unit-bearing heat in units of energy.
         """
-        try:
-            return self._get_energy_with_units("heat", dimensionless=dimensionless)
-        except:
+        if not self._measure_heat:
             raise Exception("This integrator must be constructed with 'measure_heat=True' in order to measure heat.")
-        #if not self._measure_heat:
-        #    raise Exception("This integrator must be constructed with 'measure_heat=True' in order to measure heat.")
-        #return self._get_energy_with_units("heat", dimensionless=dimensionless)
+        return self._get_energy_with_units("heat", dimensionless=dimensionless)
 
     @property
     def heat(self):
@@ -1367,7 +1342,7 @@ class LangevinIntegrator(ThermostatedIntegrator):
 
         # sanity check to make sure only allowed combinations are present in string:
         for step in splitting.split():
-            if step[0] == "V":
+            if step[0]=="V":
                 if len(step) > 1:
                     try:
                         force_group_number = int(step[1:])
@@ -1376,10 +1351,10 @@ class LangevinIntegrator(ThermostatedIntegrator):
                     except ValueError:
                         raise ValueError("You must use an integer force group")
             elif step == "{":
-                if "}" not in splitting:
-                    raise ValueError("Use of { must be followed by }")
-                if not self._verify_metropolization(splitting):
-                    raise ValueError("Shadow work generating steps found outside the Metropolization block")
+                    if "}" not in splitting:
+                        raise ValueError("Use of { must be followed by }")
+                    if not self._verify_metropolization(splitting):
+                        raise ValueError("Shadow work generating steps found outside the Metropolization block")
             elif step in allowed_characters:
                 continue
             else:
@@ -1424,7 +1399,7 @@ class LangevinIntegrator(ThermostatedIntegrator):
         #pattern to find whether any shadow work producing steps lie outside the metropolization region
         RV_outside_metropolis = "[RV](?![^{]*})"
         outside_metropolis_check = re.compile(RV_outside_metropolis)
-        if outside_metropolis_check.match(splitting.replace(" ", "")):
+        if outside_metropolis_check.match(splitting.replace(" ","")):
             return False
         else:
             return True
@@ -1463,8 +1438,7 @@ class LangevinIntegrator(ThermostatedIntegrator):
 
         # update velocities
         if self._mts:
-            self.addComputePerDof("v", "v + ((dt / {}) * f{} / m)".format(self._force_group_nV[force_group],
-                                                                          force_group))
+            self.addComputePerDof("v", "v + ((dt / {}) * f{} / m)".format(self._force_group_nV[force_group], force_group))
         else:
             self.addComputePerDof("v", "v + (dt / {}) * f / m".format(self._force_group_nV["0"]))
 
@@ -1585,7 +1559,6 @@ class LangevinIntegrator(ThermostatedIntegrator):
         self.addComputeGlobal("naccept", "ntrials - nreject")
         self.addComputeGlobal("shadow_work", "0")
 
-
 class NonequilibriumLangevinIntegrator(LangevinIntegrator):
     """Nonequilibrium integrator mix-in.
 
@@ -1674,7 +1647,6 @@ class NonequilibriumLangevinIntegrator(LangevinIntegrator):
         self.reset_protocol_work()
         super(NonequilibriumLangevinIntegrator, self).reset()
 
-
 class AlchemicalNonequilibriumLangevinIntegrator(NonequilibriumLangevinIntegrator):
     """Allows nonequilibrium switching based on force parameters specified in alchemical_functions.
     A variable named lambda is switched from 0 to 1 linearly throughout the nsteps of the protocol.
@@ -1733,7 +1705,12 @@ class AlchemicalNonequilibriumLangevinIntegrator(NonequilibriumLangevinIntegrato
     [Leimkuhler and Matthews, 2015] Molecular dynamics: with deterministic and stochastic numerical methods, Chapter 7
     """
 
-    def __init__(self, alchemical_functions=None, splitting="O { V R H R V } O", nsteps_neq=100, *args, **kwargs):
+    def __init__(self,
+                 alchemical_functions=None,
+                 splitting="O { V R H R V } O",
+                 nsteps_neq=100,
+                 *args,
+                 **kwargs):
         """
         Parameters
         ----------
@@ -1780,7 +1757,7 @@ class AlchemicalNonequilibriumLangevinIntegrator(NonequilibriumLangevinIntegrato
             raise Exception('nsteps_neq must be an integer >= 0')
 
         self._alchemical_functions = alchemical_functions
-        self._n_steps_neq = nsteps_neq  # number of integrator steps
+        self._n_steps_neq = nsteps_neq # number of integrator steps
 
         # collect the system parameters.
         self._system_parameters = {system_parameter for system_parameter in alchemical_functions.keys()}
@@ -1807,24 +1784,18 @@ class AlchemicalNonequilibriumLangevinIntegrator(NonequilibriumLangevinIntegrato
             The number of steps in the switching protocol.
         """
         super(AlchemicalNonequilibriumLangevinIntegrator, self)._add_global_variables()
-        self.addGlobalVariable('Eold', 0)  #old energy value before perturbation
-        self.addGlobalVariable('Enew', 0)  #new energy value after perturbation
-        self.addGlobalVariable(
-            'lambda',
-            0.0)  # parameter switched from 0 <--> 1 during course of integrating internal 'nsteps' of dynamics
-        self.addGlobalVariable(
-            'nsteps',
-            self._n_steps_neq)  # total number of NCMC steps to perform; this SHOULD NOT BE CHANGED during the protocol
-        self.addGlobalVariable('step', 0)  # step counter for handling initialization and terminating integration
+        self.addGlobalVariable('Eold', 0) #old energy value before perturbation
+        self.addGlobalVariable('Enew', 0) #new energy value after perturbation
+        self.addGlobalVariable('lambda', 0.0) # parameter switched from 0 <--> 1 during course of integrating internal 'nsteps' of dynamics
+        self.addGlobalVariable('nsteps', self._n_steps_neq) # total number of NCMC steps to perform; this SHOULD NOT BE CHANGED during the protocol
+        self.addGlobalVariable('step', 0) # step counter for handling initialization and terminating integration
 
         # Keep track of number of Hamiltonian updates per nonequilibrium switch
-        n_H = self._ORV_counts['H']  # number of H updates per integrator step
-        self._n_lambda_steps = self._n_steps_neq * n_H  # number of Hamiltonian increments per switching step
+        n_H = self._ORV_counts['H'] # number of H updates per integrator step
+        self._n_lambda_steps = self._n_steps_neq * n_H # number of Hamiltonian increments per switching step
         if self._n_steps_neq == 0:
-            self._n_lambda_steps = 1  # instantaneous switching
-        self.addGlobalVariable(
-            'n_lambda_steps', self._n_lambda_steps
-        )  # total number of NCMC steps to perform; this SHOULD NOT BE CHANGED during the protocol
+            self._n_lambda_steps = 1 # instantaneous switching
+        self.addGlobalVariable('n_lambda_steps', self._n_lambda_steps) # total number of NCMC steps to perform; this SHOULD NOT BE CHANGED during the protocol
         self.addGlobalVariable('lambda_step', 0)
 
     def _add_update_alchemical_parameters_step(self):
@@ -1894,7 +1865,6 @@ class AlchemicalNonequilibriumLangevinIntegrator(NonequilibriumLangevinIntegrato
         # Add all dependent parameters
         self._add_update_alchemical_parameters_step()
 
-
 class ExternalPerturbationLangevinIntegrator(NonequilibriumLangevinIntegrator):
     """
     LangevinSplittingIntegrator that accounts for external perturbations and tracks protocol work. An example of an
@@ -1916,19 +1886,19 @@ class ExternalPerturbationLangevinIntegrator(NonequilibriumLangevinIntegrator):
 
     def reset(self):
         super(ExternalPerturbationLangevinIntegrator, self).reset()
-        self.setGlobalVariableByName('first_step', 0)
+        self.setGlobalVariableByName('step', 0)
 
     def _add_global_variables(self):
         super(ExternalPerturbationLangevinIntegrator, self)._add_global_variables()
         self.addGlobalVariable("perturbed_pe", 0)
         self.addGlobalVariable("unperturbed_pe", 0)
-        self.addGlobalVariable("first_step", 0)
+        self.addGlobalVariable("step", 0)
 
     def _add_integrator_steps(self):
         self.addComputeGlobal("perturbed_pe", "energy")
         # Assumes no perturbation is done before doing the initial MD step.
-        self.beginIfBlock("first_step < 1")
-        self.addComputeGlobal("first_step", "1")
+        self.beginIfBlock("step < 1")
+        self.addComputeGlobal("step", "step + 1")
         self.addComputeGlobal("unperturbed_pe", "energy")
         self.addComputeGlobal("protocol_work", "0.0")
         self.endBlock()
@@ -1942,10 +1912,8 @@ class ExternalPerturbationLangevinIntegrator(NonequilibriumLangevinIntegrator):
         # Store final energy before perturbation
         self.addComputeGlobal("unperturbed_pe", "energy")
 
-
 class VVVRIntegrator(LangevinIntegrator):
     """Create a velocity Verlet with velocity randomization (VVVR) integrator."""
-
     def __init__(self, *args, **kwargs):
         """Create a velocity verlet with velocity randomization (VVVR) integrator.
         -----
@@ -1971,10 +1939,8 @@ class VVVRIntegrator(LangevinIntegrator):
         kwargs['splitting'] = "O V R V O"
         super(VVVRIntegrator, self).__init__(*args, **kwargs)
 
-
 class BAOABIntegrator(LangevinIntegrator):
     """Create a BAOAB integrator."""
-
     def __init__(self, *args, **kwargs):
         """Create an integrator of Langevin dynamics using the BAOAB operator splitting.
 
@@ -2109,7 +2075,6 @@ class GHMCIntegrator(LangevinIntegrator):
         """
         kwargs['splitting'] = "O { V R V } O"
         super(GHMCIntegrator, self).__init__(*args, **kwargs)
-
 
 if __name__ == '__main__':
     import doctest
