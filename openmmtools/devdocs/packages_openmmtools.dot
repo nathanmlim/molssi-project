@@ -1,8 +1,0 @@
-digraph "packages_openmmtools" {
-charset="utf-8"
-rankdir=BT
-"0" [label="alchemy", shape="box"];
-"1" [label="integrators", shape="box"];
-"2" [label="mcmc", shape="box"];
-"3" [label="states", shape="box"];
-}

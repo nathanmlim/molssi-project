@@ -1,0 +1,6 @@
+[submodule "blues"]
+	path = blues
+	url = https://github.com/nathanmlim/blues
+[submodule "openmmtools"]
+	path = openmmtools
+	url = https://github.com/choderalab/openmmtools.git

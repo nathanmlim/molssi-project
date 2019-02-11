@@ -1,7 +1,0 @@
-digraph "packages_blues" {
-charset="utf-8"
-rankdir=BT
-"0" [label="integrators", shape="box"];
-"1" [label="moves", shape="box"];
-"2" [label="simulation", shape="box"];
-}
